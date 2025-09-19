@@ -9,7 +9,8 @@ defineModule(sim, list(
   timeunit = "year",
   citation = list("citation.bib"),
   documentation = deparse(list("README.txt", "spades_ws3_landrAge.Rmd")),
-  reqdPkgs = list('raster', 'magrittr'),
+  loadOrder = list(after = c("spades_ws3_dataInit")),
+  reqdPkgs = list('terra', 'data.table'),
   parameters = rbind(
     #defineParameter("paramName", "paramClass", value, min, max, "parameter description"),
     defineParameter(".plotInitialTime", "numeric", NA, NA, NA,
@@ -27,23 +28,24 @@ defineModule(sim, list(
     defineParameter('basenames', 'character', NA, NA, NA,
                     'vector of MU basenames to load, beginning with tsa, e.g. "tsa40"'),
     defineParameter('base.year', 'numeric', 2015, NA, NA, "base year of forest inventory data"),
-    defineParameter("tifPath", "character", 'tif', NA, NA,
+    defineParameter("tif.path", "character", 'tif', NA, NA,
                     "the name of the directory where harvest tifs are stored (currently in inputs)")
   ),
   inputObjects = bind_rows(
-    #expectsInput("objectName", "objectClass", "input object description", sourceURL, ...),
-    expectsInput(objectName = 'landscape', objectClass = 'RasterStack',
+    expectsInput(objectName = 'landscape', objectClass = 'SpatRaster',
                  desc = 'a raster stack consisting of FMU, THLB, AU, Block ID, and stand age', sourceURL = NA),
-    expectsInput(objectName = 'rstCurrentBurn', objectClass = 'RasterLayer',
+    expectsInput(objectName = "rasterToMatch", objectClass = "SpatRaster", desc = "foo"),
+    expectsInput(objectName = 'rstCurrentBurn', objectClass = 'SpatRaster',
                  desc = 'a binary raster representing annual burn'),
-    expectsInput(objectName = 'pixelGroupMap', objectClass = 'RasterLayer',
+    expectsInput(objectName = 'pixelGroupMap', objectClass = 'SpatRaster',
                  desc = 'map of pixelGroups in LandR simulations'),
+    expectsInput(objectName = "studyArea", objectClass = "SpatVector", desc = "foo"),
     expectsInput(objectName = 'cohortData', objectClass = 'data.table',
                  desc = "Columns: B, pixelGroup, speciesCode, Indicating several features about ages and current vegetation of stand")
   ),
   outputObjects = bind_rows(
     #createsOutput("objectName", "objectClass", "output object description", ...),
-    createsOutput(objectName = 'rstCurrentHarvest', objectClass = 'RasterLayer',
+    createsOutput(objectName = 'rstCurrentHarvest', objectClass = 'SpatRaster',
                   desc = 'a raster representing annual harvest areas'),
     createsOutput(objectName = 'harvestStats', objectClass = 'data.frame',
                   desc = 'data.frame witih simple harvest reporting over landscape'),
@@ -73,11 +75,12 @@ doEvent.spades_ws3_landrAge = function(sim, eventTime, eventType) {
     },
 
     adjustBurnedPixels = {
-
       if (!is.null(sim$rstCurrentBurn)){
-        if (compareRaster(sim$landscape$age, sim$rstCurrentBurn)) {
+        if (compareGeom(rast(sim$landscape$age), sim$rstCurrentBurn)) {
         #adjust age of burned pixels - this module assumes annual burns
-        sim$landscape$age[sim$rstCurrentBurn == 1] <- 0
+
+        sim$landscape$age[as.vector(sim$rstCurrentBurn) == 1] <- 0
+        # sim$landscape$age[sim$rstCurrentBurn == 1] <- 0
         } else {
           warning("rstCurrentBurn properties do not align with sim$landscape$age")
         }
@@ -89,22 +92,20 @@ doEvent.spades_ws3_landrAge = function(sim, eventTime, eventType) {
     },
 
     outputHarvestRst = {
-
       harvestYear <- P(sim)$base.year + time(sim) - start(sim)
       #e.g. 2015 + 2018 - 2011, if start(sim) != base.year
       rstCurrentHarvest <- buildHarvest(harvestYear,
                                         basenames = P(sim)$basenames,
-                                        tifPath = P(sim)$tifPath,
+                                        tif.path = P(sim)$tif.path,
                                         inputPath = inputPath(sim))
 
-      ws3count <- sum(getValues(rstCurrentHarvest) == 1, na.rm = TRUE)
+      ws3count <- sum(rstCurrentHarvest[] == 1, na.rm = TRUE)
 
       rstCurrentHarvest[is.na(rstCurrentHarvest)] <- 0
       rstCurrentHarvest[is.na(sim$pixelGroupMap)] <- NA
       sim$rstCurrentHarvest <- rstCurrentHarvest
-      landrCount <- sum(getValues(sim$rstCurrentHarvest) == 1, na.rm = TRUE)
+      landrCount <- sum(sim$rstCurrentHarvest[] == 1, na.rm = TRUE)
 
-      sim$rstCurrentHarvest@data@attributes$Year <- time(sim)
       currentHarvestStats <- data.frame('ws3_harvestArea_pixels' = ws3count,
                                         'LandR_harvestArea_pixels' = landrCount,
                                         'year' = time(sim))
@@ -138,29 +139,24 @@ Init <- function(sim) {
 
 ### template for save events
 Save <- function(sim) {
-  sim <- saveFiles(sim)
+
   return(invisible(sim))
 }
 
 ### template for plot events
 plotFun <- function(sim) {
 
-  Plot(sim$rstCurrentHarvest)
   return(invisible(sim))
 }
 
 ### template for your event1
-buildHarvest <- function(harvestYear, basenames, tifPath, inputPath) {
+buildHarvest <- function(harvestYear, basenames, tif.path, inputPath) {
 
-  filePaths <- file.path(inputPath, tifPath, basenames, paste0("projected_harvest_", harvestYear, ".tif"))
-  outputRaster <- lapply(filePaths, FUN = raster::raster)
+  filePaths <- file.path(inputPath, tif.path, basenames, paste0("projected_harvest_", harvestYear, ".tif"))
+  outputRaster <- lapply(filePaths, FUN = rast)
 
   if (length(outputRaster) > 1){
-
-    names(outputRaster)[1:2] <- c("x", "y") #needed for mosaic
-    outputRaster$fun <- 'mean'
-    outputRaster$na.rm <- TRUE
-    outputRaster <- do.call(mosaic, outputRaster)
+    outputRaster <- do.call(terra::mosaic, outputRaster)
     outputRaster[is.nan(outputRaster)] <- NA # replace NaN values with NA
   } else {
     outputRaster <- outputRaster[[1]]
@@ -175,11 +171,12 @@ makeHarvestedCohorts <- function(pixelGroupMap, rstCurrentHarvest, cohortData, c
   #this object is necessary in the event harvest occurs on a pixelGroup 0.
   #this is possible if the pixelGroup is at longevity or gets burned.
   #For this reason, we retain the cohort info here.
-  cdLong <- data.table(pixelGroup = getValues(pixelGroupMap),
+  cdLong <- data.table(pixelGroup = as.vector(pixelGroupMap),
                        pixelIndex = 1:ncell(pixelGroupMap),
-                       harvest = getValues(rstCurrentHarvest)) %>%
-    na.omit(.) %>%
-    .[harvest == 1,]
+                       harvest = as.vector(rstCurrentHarvest)) |>
+    na.omit()
+  cdLong <- cdLong[harvest == 1,]
+
   #must be cartesian because multiple cohorts, multiple pixels per PG
   harvestedPixels <- cohortData[cdLong, on = c('pixelGroup'), allow.cartesian = TRUE]
 
@@ -188,25 +185,50 @@ makeHarvestedCohorts <- function(pixelGroupMap, rstCurrentHarvest, cohortData, c
 }
 
 .inputObjects <- function(sim) {
-  # Any code written here will be run during the simInit for the purpose of creating
-  # any objects required by this module and identified in the inputObjects element of defineModule.
-  # This is useful if there is something required before simulation to produce the module
-  # object dependencies, including such things as downloading default datasets, e.g.,
-  # downloadData("LCC2005", modulePath(sim)).
-  # Nothing should be created here that does not create a named object in inputObjects.
-  # Any other initiation procedures should be put in "init" eventType of the doEvent function.
-  # Note: the module developer can check if an object is 'suppliedElsewhere' to
-  # selectively skip unnecessary steps because the user has provided those inputObjects in the
-  # simInit call, or another module will supply or has supplied it. e.g.,
-  # if (!suppliedElsewhere('defaultColor', sim)) {
-  #   sim$map <- Cache(prepInputs, extractURL('map')) # download, extract, load file from url in sourceURL
-  # }
 
   #cacheTags <- c(currentModule(sim), "function:.inputObjects") ## uncomment this if Cache is being used
   dPath <- asPath(getOption("reproducible.destinationPath", dataPath(sim)), 1)
   message(currentModule(sim), ": using dataPath '", dPath, "'.")
 
-  # ! ----- EDIT BELOW ----- ! #
+
+  if (!suppliedElsewhere("landscape", sim)) {
+    sim$landscape <- list(fmuid = raster(vals = 41),
+                          thlb = raster(vals = 1),
+                          au = raster(vals = 4101000),
+                          blockid = raster(vals = 4101001),
+                          age = raster(vals = 42)) |>
+      stack()
+  }
+
+
+  if (!suppliedElsewhere("studyArea", sim)) {
+    studyArea <- sim$landscape[[1]]
+    studyArea <- rast(ext(studyArea))
+  }
+
+  if (!suppliedElsewhere("rasterToMatch", sim)) {
+    sim$rasterToMatch <- terra::rast(sim$landscape[[1]])
+    #get the spatial attributes
+    sim$rasterToMatch[] <- 1
+    sim$rasterToMatch <- mask(sim$rasterToMatch, sim$studyArea)
+  }
+
+  if (!suppliedElsewhere("pixelGroupMap", sim)) {
+    sim$pixelGroupMap <- rast(sim$landscape$blockid[[1]])
+    names(sim$pixelGroupMap) <- "pixelGroup"
+  }
+
+  if (!suppliedElsewhere("cohortData", sim)) {
+    ## this isn't correct as ages aren't unique to block id but
+    ## it only matters if Biomass_core is run
+    ## (in which case cohortData should be supplied elsewhere)
+    sim$cohortData <- data.table(
+      "ecoregionGroup" = as.factor("ecofoo_13"),
+      "speciesCode" = "foo6",
+      "pixelGroup" = na.omit(as.vector(sim$pixelGroupMap)),
+      "B" = 7777,
+      "age" = na.omit(sim$landscape$age[]))
+  }
 
   # ! ----- STOP EDITING ----- ! #
   return(invisible(sim))
