@@ -17,12 +17,15 @@ eventCalls <- function(type) {
   found
 }
 
-test_that("every adjustBurnedPixels event is scheduled after scfmSpread's burn (7.5)", {
+test_that("adjustBurnedPixels runs after the fire and its readers, at the same priority every year", {
+  # Order each year: scfmSpread burn (7.5) -> modules that read pre-fire ages, e.g.
+  # ws3Verify_FRESH collectStats (8) -> adjustBurnedPixels resets the burned ages.
   calls <- eventCalls("adjustBurnedPixels")
   expect_gte(length(calls), 2)  # the first one (init) and the yearly re-schedule
-  for (cl in calls) {
-    prio <- as.list(cl)$eventPriority
-    expect_false(is.null(prio), info = deparse(cl))  # default priority 5 runs before the burn
-    expect_gt(eval(prio), 7.5)
-  }
+  prios <- vapply(calls, function(cl) {
+    p <- as.list(cl)$eventPriority
+    if (is.null(p)) 5 else eval(p)     # no eventPriority = SpaDES default 5, before the burn
+  }, numeric(1))
+  expect_length(unique(prios), 1)
+  expect_true(all(prios > 8), info = paste(prios, collapse = ", "))
 })
