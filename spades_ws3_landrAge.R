@@ -82,7 +82,8 @@ doEvent.spades_ws3_landrAge = function(sim, eventTime, eventType) {
       } else {
         message(paste0('no rstCurrentBurn present for year '), time(sim))
       }
-      sim <- scheduleEvent(sim, time(sim) + 1, "spades_ws3_landrAge", "adjustBurnedPixels")
+      # eventPriority 9 again: after this year's fire (scfmSpread burns at 7.5), as at init.
+      sim <- scheduleEvent(sim, time(sim) + 1, "spades_ws3_landrAge", "adjustBurnedPixels", eventPriority = 9)
 
     },
 
