@@ -46,7 +46,9 @@ defineModule(sim, list(
   outputObjects = bindrows(
     #createsOutput("objectName", "objectClass", "output object description", ...),
     createsOutput(objectName = 'rstCurrentHarvest', objectClass = 'SpatRaster',
-                  desc = 'a raster representing annual harvest areas'),
+                  desc = paste('a raster representing annual harvest areas: from spades_ws3\'s',
+                               'applied_harvest_<year>.tif when present (harvestTiming = "annual"),',
+                               'otherwise projected_harvest_<year>.tif')),
     createsOutput(objectName = 'harvestStats', objectClass = 'data.frame',
                   desc = 'data.frame witih simple harvest reporting over landscape'),
     createsOutput(objectName = 'harvestedCohorts', objectClass = 'data.table',
@@ -153,6 +155,10 @@ plotFun <- function(sim) {
 buildHarvest <- function(harvestYear, basenames, tif.path, inputPath) {
 
   filePaths <- file.path(inputPath, tif.path, basenames, paste0("projected_harvest_", harvestYear, ".tif"))
+  # spades_ws3 with harvestTiming = "annual" also writes what it actually harvested (planned
+  # pixels minus those reset since the plan, e.g. burned); report that when it exists.
+  appliedPaths <- file.path(inputPath, tif.path, basenames, paste0("applied_harvest_", harvestYear, ".tif"))
+  if (all(file.exists(appliedPaths))) filePaths <- appliedPaths
   outputRaster <- lapply(filePaths, FUN = rast)
 
   if (length(outputRaster) > 1){
